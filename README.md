@@ -22,8 +22,12 @@ Minimal starter for the take-home **Inbox Concierge** project:
 
 - `GET /api/auth/google/url`
   - Returns Google OAuth URL if env vars are configured.
+- `GET /api/auth/google/callback`
+  - OAuth callback endpoint that exchanges auth code and stores tokens in secure HTTP-only cookie.
+- `GET /api/auth/session`
+  - Indicates whether a Google auth session is present.
 - `GET /api/emails`
-  - Returns mock email threads (replace with Gmail API last-200-thread fetch).
+  - Returns last 200 Gmail threads using authenticated user context.
 - `POST /api/classify`
   - Accepts optional `customBuckets`, classifies threads into buckets.
 - `POST /api/buckets/reclassify`
@@ -31,11 +35,11 @@ Minimal starter for the take-home **Inbox Concierge** project:
 
 ## What To Implement Next (Production)
 
-1. OAuth callback route to exchange authorization code and persist refresh token.
-2. Gmail fetch pipeline for last 200 threads (`users.threads.list` + `users.threads.get`).
-3. LLM classifier replacing rule-based placeholder classifier.
-4. Lightweight persistence (Postgres + Prisma) for users, bucket defs, and cached classifications.
-5. Background job queue for async recategorization and progress updates.
+1. LLM classifier replacing current rule-based placeholder classifier.
+2. Lightweight persistence (Postgres + Prisma) for users, bucket defs, and cached classifications.
+3. Background job queue for async recategorization and progress updates.
+4. Better OAuth session handling (encrypted server-side session store vs demo cookie storage).
+5. Per-thread confidence + human override workflow.
 
 ## Deployment
 

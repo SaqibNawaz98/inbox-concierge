@@ -1,7 +1,9 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { useEffect } from "react";
 import type { BucketedThreads } from "@/lib/types";
+import type { EmailThread } from "@/lib/types";
 
 export default function Home() {
   const [customBucketInput, setCustomBucketInput] = useState("");
@@ -9,19 +11,49 @@ export default function Home() {
   const [bucketedThreads, setBucketedThreads] = useState<BucketedThreads>({});
   const [status, setStatus] = useState("Idle");
   const [oauthMessage, setOauthMessage] = useState("");
+  const [isConnected, setIsConnected] = useState(false);
 
   const bucketNames = useMemo(() => Object.keys(bucketedThreads), [bucketedThreads]);
 
+  useEffect(() => {
+    void (async () => {
+      const sessionResponse = await fetch("/api/auth/session");
+      const sessionData = await sessionResponse.json();
+      setIsConnected(Boolean(sessionData.connected));
+
+      const params = new URLSearchParams(window.location.search);
+      const authStatus = params.get("auth");
+      const authReason = params.get("reason");
+      if (authStatus === "success") {
+        setOauthMessage("Google account connected.");
+        setIsConnected(true);
+      } else if (authStatus === "error") {
+        setOauthMessage(`Authentication failed: ${authReason ?? "unknown_error"}`);
+      }
+    })();
+  }, []);
+
   async function classifyCurrent(custom: string[]) {
+    setStatus("Loading threads...");
+    const emailResponse = await fetch("/api/emails");
+    const emailData = await emailResponse.json();
+
+    if (!emailResponse.ok) {
+      setStatus("Failed");
+      setOauthMessage(emailData.message ?? "Could not load Gmail threads.");
+      return;
+    }
+
+    const threads = (emailData.threads ?? []) as EmailThread[];
     setStatus("Classifying...");
     const response = await fetch("/api/classify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ customBuckets: custom }),
+      body: JSON.stringify({ customBuckets: custom, threads }),
     });
     const data = await response.json();
     setBucketedThreads(data.classification ?? {});
-    setStatus("Done");
+    setStatus(`Done (${threads.length} threads)`);
   }
 
   async function handleConnectGoogle() {
@@ -68,7 +100,7 @@ export default function Home() {
               onClick={handleConnectGoogle}
               className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
             >
-              Connect Google
+              {isConnected ? "Reconnect Google" : "Connect Google"}
             </button>
             <button
               onClick={() => void classifyCurrent(customBuckets)}
@@ -77,6 +109,9 @@ export default function Home() {
               Load + Classify Threads
             </button>
             <span className="self-center text-xs text-slate-500">Status: {status}</span>
+            <span className="self-center text-xs text-slate-500">
+              Google: {isConnected ? "Connected" : "Not connected"}
+            </span>
           </div>
           {oauthMessage ? <p className="mt-3 text-sm text-amber-700">{oauthMessage}</p> : null}
         </header>

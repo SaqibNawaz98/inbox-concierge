@@ -1,37 +1,33 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import { getGoogleOAuthClient, GOOGLE_OAUTH_SCOPES } from "@/lib/google";
+import { setGoogleStateCookie } from "@/lib/authCookies";
 
 export async function GET() {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+  try {
+    const oauthClient = getGoogleOAuthClient();
+    const state = randomUUID();
+    await setGoogleStateCookie(state);
 
-  if (!clientId || !redirectUri) {
+    const authUrl = oauthClient.generateAuthUrl({
+      access_type: "offline",
+      scope: GOOGLE_OAUTH_SCOPES,
+      prompt: "consent",
+      state,
+    });
+
+    return NextResponse.json({ configured: true, authUrl });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Google OAuth is not configured yet.";
     return NextResponse.json(
       {
         configured: false,
-        message:
-          "Google OAuth is not configured yet. Add GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI.",
+        message,
       },
       { status: 400 }
     );
   }
-
-  const scope = encodeURIComponent(
-    [
-      "openid",
-      "email",
-      "profile",
-      "https://www.googleapis.com/auth/gmail.readonly",
-    ].join(" ")
-  );
-
-  const authUrl =
-    "https://accounts.google.com/o/oauth2/v2/auth" +
-    `?client_id=${encodeURIComponent(clientId)}` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    "&response_type=code" +
-    "&access_type=offline" +
-    `&scope=${scope}` +
-    "&prompt=consent";
-
-  return NextResponse.json({ configured: true, authUrl });
 }
