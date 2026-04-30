@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## Inbox Concierge (Skeleton)
 
-## Getting Started
+Minimal starter for the take-home **Inbox Concierge** project:
 
-First, run the development server:
+- React web app with Next.js (App Router)
+- Google OAuth URL generation endpoint
+- Mock Gmail thread ingestion endpoint
+- Bucket classification endpoint + custom bucket recategorization
+- Simple UI for "connect, classify, add buckets, reclassify"
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Quick Start
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+1. Install dependencies:
+   - `npm install`
+2. Copy environment template:
+   - `cp .env.example .env.local`
+3. Run dev server:
+   - `npm run dev`
+4. Open [http://localhost:3000](http://localhost:3000)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Current API Endpoints
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `GET /api/auth/google/url`
+  - Returns Google OAuth URL if env vars are configured.
+- `GET /api/emails`
+  - Returns mock email threads (replace with Gmail API last-200-thread fetch).
+- `POST /api/classify`
+  - Accepts optional `customBuckets`, classifies threads into buckets.
+- `POST /api/buckets/reclassify`
+  - Re-runs classification after custom bucket updates.
 
-## Learn More
+## What To Implement Next (Production)
 
-To learn more about Next.js, take a look at the following resources:
+1. OAuth callback route to exchange authorization code and persist refresh token.
+2. Gmail fetch pipeline for last 200 threads (`users.threads.list` + `users.threads.get`).
+3. LLM classifier replacing rule-based placeholder classifier.
+4. Lightweight persistence (Postgres + Prisma) for users, bucket defs, and cached classifications.
+5. Background job queue for async recategorization and progress updates.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deployment
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Recommended: Vercel for frontend + API routes.
+- Configure Google OAuth redirect URI to your deployed domain callback.
+- Add env vars in Vercel project settings.
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- This repository intentionally starts with mock data and deterministic rules to keep scope minimal.
+- The skeleton is designed so you can quickly swap each stage with real Gmail + LLM logic.
