@@ -2,13 +2,15 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { accountKeyFromRefreshToken } from "@/lib/accountKey";
 import { readGoogleTokensCookie } from "@/lib/authCookies";
-import { prisma } from "@/lib/prisma";
 import {
-  SAVED_BUCKETS_COOKIE,
+  bucketsFromDatabaseJson,
+  normalizeActiveBucketsForClassification,
   parseSavedBucketsCookie,
   serializeSavedBucketsCookie,
-  validateBucketList,
-} from "@/lib/savedCustomBuckets";
+  wrapBucketListForDatabase,
+} from "@/lib/activeBuckets";
+import { prisma } from "@/lib/prisma";
+import { SAVED_BUCKETS_COOKIE, validateBucketList } from "@/lib/savedCustomBuckets";
 
 const COOKIE_MAX = 3800;
 
@@ -19,10 +21,7 @@ async function readBucketsFromStore(accountKey: string): Promise<string[]> {
         where: { accountKey },
       });
       if (row?.buckets != null) {
-        const parsed = validateBucketList(row.buckets);
-        if (parsed) {
-          return parsed;
-        }
+        return bucketsFromDatabaseJson(row.buckets);
       }
     } catch {
       // fall through to cookie
@@ -31,7 +30,12 @@ async function readBucketsFromStore(accountKey: string): Promise<string[]> {
 
   const store = await cookies();
   const raw = store.get(SAVED_BUCKETS_COOKIE)?.value;
-  return parseSavedBucketsCookie(raw, accountKey) ?? [];
+  const parsed = parseSavedBucketsCookie(raw, accountKey);
+  if (parsed != null) {
+    return parsed;
+  }
+  /** No cookie / wrong account bundle — behave like DB miss (preset four buckets). */
+  return normalizeActiveBucketsForClassification([]);
 }
 
 export async function GET() {
@@ -68,15 +72,20 @@ export async function POST(request: Request) {
   }
 
   const accountKey = accountKeyFromRefreshToken(tokens.refresh_token);
+  const persisted = wrapBucketListForDatabase(normalized);
 
   if (process.env.DATABASE_URL?.trim()) {
     try {
       await prisma.savedCustomBuckets.upsert({
         where: { accountKey },
-        create: { accountKey, buckets: normalized },
-        update: { buckets: normalized },
+        create: { accountKey, buckets: persisted },
+        update: { buckets: persisted },
       });
-      return NextResponse.json({ ok: true, buckets: normalized, storage: "database" });
+      return NextResponse.json({
+        ok: true,
+        buckets: normalized,
+        storage: "database",
+      });
     } catch {
       // cookie fallback below
     }

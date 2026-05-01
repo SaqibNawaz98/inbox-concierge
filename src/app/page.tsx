@@ -8,9 +8,17 @@ import {
   useRef,
   useState,
 } from "react";
+import { DEFAULT_BUCKETS } from "@/lib/buckets";
 import { INBOX_THREAD_PRESETS } from "@/lib/gmailInboxLimits";
+import {
+  flattenBucketSelection,
+  normalizeActiveBucketsForClassification,
+  splitStoredBucketList,
+  TRIAGE_BUCKET_LIST_FV,
+  triageBucketsFromBlob,
+} from "@/lib/activeBuckets";
 import { LEARNING_OPTIONAL_SETUP_MESSAGE } from "@/lib/learningSetupMessage";
-import type { BucketedThreads, EmailThread } from "@/lib/types";
+import type { BucketedThreads, BucketName, EmailThread } from "@/lib/types";
 
 const apiFetch: typeof fetch = (input, init) =>
   fetch(input, { credentials: "include", cache: "no-store", ...init });
@@ -43,6 +51,11 @@ type ClassifyMetadata = {
 };
 
 const TRIAGE_SESSION_KEY = "inbox-concierge-triage-v1";
+const RESTORE_STATUS_PREFIX = "Restored ·";
+/** OAuth return success copy; shown briefly as a top toast. */
+const SIGN_IN_SUCCESS_PREFIX = "Signed in successfully";
+/** Learning example saved; centered dialog instead of inline banner. */
+const LEARNING_SAVED_CONFIRM_PREFIX = "Saved as a training example";
 const LLM_PREFS_STORAGE_KEY = "inbox_concierge_llm_prefs";
 const LEGACY_CLIENT_OPENAI_KEY = "inbox_concierge_client_openai_key";
 const LLM_MODEL_ID_MAX_LEN = 128;
@@ -193,6 +206,7 @@ type TriageSessionBlob = {
   classifiedBucketFingerprint: string | null;
   customBuckets: string[];
   classifyMeta: ClassifyMetadata | null;
+  bucketListFv?: typeof TRIAGE_BUCKET_LIST_FV;
 };
 
 function bucketedHasThreads(bt: BucketedThreads): boolean {
@@ -259,6 +273,11 @@ function mergeUnique(existing: string[], additions: string[]): string[] {
   return next;
 }
 
+function nameCollidesWithPreset(raw: string): boolean {
+  const t = raw.trim().toLowerCase();
+  return DEFAULT_BUCKETS.some((d) => d.toLowerCase() === t);
+}
+
 function compactThreadsForClassify(threads: EmailThread[]): EmailThread[] {
   return threads.map((thread) => ({
     ...thread,
@@ -318,7 +337,10 @@ function SettingsGearIcon({ className }: { className?: string }) {
 
 export default function Home() {
   const [customBucketInput, setCustomBucketInput] = useState("");
-  const [customBuckets, setCustomBuckets] = useState<string[]>([]);
+  /** Preset buckets the user hid (canonical names matching DEFAULT_BUCKETS). */
+  const [excludedPresetKeys, setExcludedPresetKeys] = useState<BucketName[]>([]);
+  /** User-created bucket names only (never the four preset labels). */
+  const [extraBuckets, setExtraBuckets] = useState<string[]>([]);
   const [threads, setThreads] = useState<EmailThread[] | null>(null);
   const [inboxGeneration, setInboxGeneration] = useState(0);
   const [classifiedGeneration, setClassifiedGeneration] = useState<number | null>(
@@ -332,6 +354,12 @@ export default function Home() {
   const [status, setStatus] = useState("Idle");
   const [oauthMessage, setOauthMessage] = useState("");
   const [classifyNotice, setClassifyNotice] = useState("");
+  /** Shown between hero and bucket grid while /api/classify is in flight. */
+  const [classifyProgressBanner, setClassifyProgressBanner] = useState<{
+    startedAt: number;
+    threadCount: number;
+  } | null>(null);
+  const [classifyProgressSec, setClassifyProgressSec] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [classifyMeta, setClassifyMeta] = useState<ClassifyMetadata | null>(null);
   const [learningMessage, setLearningMessage] = useState("");
@@ -382,9 +410,13 @@ export default function Home() {
   }, [inboxMaxCap, inboxLoadLimit]);
 
   const bucketNames = useMemo(() => Object.keys(bucketedThreads), [bucketedThreads]);
+  const effectiveBuckets = useMemo(
+    () => flattenBucketSelection(excludedPresetKeys, extraBuckets),
+    [excludedPresetKeys, extraBuckets],
+  );
   const activeBucketsFingerprint = useMemo(
-    () => bucketsFingerprint(customBuckets),
-    [customBuckets]
+    () => bucketsFingerprint(effectiveBuckets),
+    [effectiveBuckets],
   );
 
   const learningDbResolved = useMemo(() => {
@@ -418,6 +450,23 @@ export default function Home() {
     status.startsWith("Fetching") ||
     status.startsWith("Classifying");
 
+  useEffect(() => {
+    if (!classifyProgressBanner) {
+      setClassifyProgressSec(0);
+      return;
+    }
+    const label = (sec: number) =>
+      `Classifying… ${sec}s · ${classifyProgressBanner.threadCount} threads — model is sorting (large inboxes may take ~2–3 min)`;
+    const tick = () => {
+      const sec = Math.floor((Date.now() - classifyProgressBanner.startedAt) / 1000);
+      setClassifyProgressSec(sec);
+      setStatus(label(sec));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [classifyProgressBanner]);
+
   const loadBucketsFromAccount = useCallback(async (): Promise<string[]> => {
     loadBucketsAbortRef.current?.abort();
     const controller = new AbortController();
@@ -431,16 +480,21 @@ export default function Home() {
         return [];
       }
       const data = await res.json();
-      const list = Array.isArray(data.buckets)
+      const rawList = Array.isArray(data.buckets)
         ? data.buckets.filter((x: unknown): x is string => typeof x === "string")
         : [];
       if (controller.signal.aborted) {
         return [];
       }
-      setCustomBuckets(list);
-      lastPersistedFingerprint.current = bucketsFingerprint(list);
+      const listMerged = normalizeActiveBucketsForClassification(rawList);
+      const { excludedPresets, extras } = splitStoredBucketList(listMerged);
+      const excludedSortedLocal = [...new Set(excludedPresets)].sort() as BucketName[];
+      setExcludedPresetKeys(excludedSortedLocal);
+      setExtraBuckets(extras);
+      const eff = flattenBucketSelection(excludedSortedLocal, extras);
+      lastPersistedFingerprint.current = bucketsFingerprint(eff);
       setBucketsPersistEnabled(true);
-      return list;
+      return eff;
     } catch {
       if (!controller.signal.aborted) {
         setBucketsPersistEnabled(true);
@@ -544,7 +598,8 @@ export default function Home() {
         inboxGeneration,
         classifiedGeneration,
         classifiedBucketFingerprint,
-        customBuckets,
+        customBuckets: effectiveBuckets,
+        bucketListFv: TRIAGE_BUCKET_LIST_FV,
         classifyMeta,
       });
     }, 400);
@@ -560,7 +615,7 @@ export default function Home() {
     inboxGeneration,
     classifiedGeneration,
     classifiedBucketFingerprint,
-    customBuckets,
+    effectiveBuckets,
     classifyMeta,
   ]);
 
@@ -568,7 +623,7 @@ export default function Home() {
     if (!isConnected || !bucketsPersistEnabled) {
       return;
     }
-    const fp = bucketsFingerprint(customBuckets);
+    const fp = bucketsFingerprint(effectiveBuckets);
     if (fp === lastPersistedFingerprint.current) {
       return;
     }
@@ -579,7 +634,7 @@ export default function Home() {
           const res = await apiFetch("/api/buckets/saved", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ buckets: customBuckets }),
+            body: JSON.stringify({ buckets: effectiveBuckets }),
           });
           const payload = await res.json().catch(() => ({}));
           if (!res.ok) {
@@ -590,7 +645,7 @@ export default function Home() {
             );
             return;
           }
-          lastPersistedFingerprint.current = bucketsFingerprint(customBuckets);
+          lastPersistedFingerprint.current = bucketsFingerprint(effectiveBuckets);
           setBucketsSaveHint("Saved to your account");
           window.setTimeout(() => setBucketsSaveHint(""), 2200);
         } catch {
@@ -599,7 +654,36 @@ export default function Home() {
       })();
     }, 750);
     return () => window.clearTimeout(timer);
-  }, [customBuckets, isConnected, bucketsPersistEnabled]);
+  }, [effectiveBuckets, isConnected, bucketsPersistEnabled]);
+
+  useEffect(() => {
+    if (!oauthMessage.startsWith(SIGN_IN_SUCCESS_PREFIX)) {
+      return;
+    }
+    const hide = window.setTimeout(() => {
+      setOauthMessage("");
+    }, 4200);
+    return () => window.clearTimeout(hide);
+  }, [oauthMessage]);
+
+  useEffect(() => {
+    if (!learningMessage.startsWith(LEARNING_SAVED_CONFIRM_PREFIX)) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setLearningMessage("");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const hide = window.setTimeout(() => {
+      setLearningMessage("");
+    }, 5200);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.clearTimeout(hide);
+    };
+  }, [learningMessage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -620,7 +704,7 @@ export default function Home() {
         } catch {
           /* ignore */
         }
-        setOauthMessage("Signed in successfully. You're ready to triage Gmail.");
+        setOauthMessage(`${SIGN_IN_SUCCESS_PREFIX}. You're ready to triage Gmail.`);
         connected = true;
       } else if (authStatus === "error") {
         setOauthMessage(`Sign-in didn't finish: ${authReason ?? "unknown_error"}`);
@@ -648,10 +732,18 @@ export default function Home() {
         setClassifiedGeneration(blob.classifiedGeneration);
         setClassifiedBucketFingerprint(blob.classifiedBucketFingerprint);
         setClassifyMeta(blob.classifyMeta);
-        if (Array.isArray(blob.customBuckets)) {
-          setCustomBuckets(blob.customBuckets);
-        }
-        lastPersistedFingerprint.current = bucketsFingerprint(blob.customBuckets ?? []);
+        const restoredMerged = triageBucketsFromBlob(
+          blob.customBuckets ?? [],
+          blob.bucketListFv,
+        );
+        const restoredSplit = splitStoredBucketList(restoredMerged);
+        const excludedSorted = [...new Set(restoredSplit.excludedPresets)].sort(
+        ) as BucketName[];
+        setExcludedPresetKeys(excludedSorted);
+        setExtraBuckets(restoredSplit.extras);
+        lastPersistedFingerprint.current = bucketsFingerprint(
+          flattenBucketSelection(excludedSorted, restoredSplit.extras),
+        );
         setBucketsPersistEnabled(true);
         const hasSort =
           blob.classifiedGeneration != null &&
@@ -659,20 +751,19 @@ export default function Home() {
           bucketedHasThreads(blob.bucketedThreads);
         setStatus(
           hasSort
-            ? `Restored · ${blob.threads.length} threads and sorts (this browser tab)`
-            : `Restored · ${blob.threads.length} threads — run classification when ready`
+            ? `${RESTORE_STATUS_PREFIX} ${blob.threads.length} threads and sorts (this browser tab)`
+            : `${RESTORE_STATUS_PREFIX} ${blob.threads.length} threads — run classification when ready`
         );
         return;
       }
 
-      const bucketSnapshot = await loadBucketsFromAccount();
+      await loadBucketsFromAccount();
       if (cancelled) {
         return;
       }
-      await loadGmailThreadsRef.current({
-        autoClassify: true,
-        customBucketsForAutoClassify: bucketSnapshot,
-      });
+      // Do not auto-run classification here: users need a chance to open settings and
+      // paste an API key (or rely on server env) before paying for / waiting on LLM.
+      await loadGmailThreadsRef.current();
     })();
 
     return () => {
@@ -789,21 +880,18 @@ export default function Home() {
     }
 
     const genAtRun = options?.inboxGenerationAtRun ?? inboxGeneration;
-    const bucketsForRequest = options?.customBucketsOverride ?? customBuckets;
+    const bucketsForRequest = options?.customBucketsOverride ?? effectiveBuckets;
     const fingerprintAtRun = bucketsFingerprint(bucketsForRequest);
     const payloadThreads = compactThreadsForClassify(sourceThreads);
 
     setClassifyNotice("");
+    setClassifyProgressBanner({
+      startedAt: Date.now(),
+      threadCount: payloadThreads.length,
+    });
     setStatus(
-      `Classifying… 0s · ${payloadThreads.length} threads (one API call when possible, else parallel batches)`
+      `Classifying… 0s · ${payloadThreads.length} threads — model is sorting (large inboxes may take ~2–3 min)`
     );
-    const classifyStarted = Date.now();
-    const progressTimer = window.setInterval(() => {
-      const sec = Math.floor((Date.now() - classifyStarted) / 1000);
-      setStatus(
-        `Classifying… ${sec}s · ${payloadThreads.length} threads — model is sorting (large inboxes may take ~2–3 min)`
-      );
-    }, 2500);
 
     const classifyAbort =
       typeof AbortSignal !== "undefined" &&
@@ -827,7 +915,7 @@ export default function Home() {
         ...(classifyAbort ? { signal: classifyAbort } : {}),
       });
     } catch (error) {
-      window.clearInterval(progressTimer);
+      setClassifyProgressBanner(null);
       setStatus("Classification failed");
       const message =
         error instanceof Error ? error.message : "Classification request aborted or failed.";
@@ -841,10 +929,9 @@ export default function Home() {
       return;
     }
 
-    window.clearInterval(progressTimer);
-
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      setClassifyProgressBanner(null);
       setStatus("Classification failed");
       setClassifyNotice(
         typeof data.message === "string"
@@ -875,15 +962,11 @@ export default function Home() {
       const total = meta.threadsTotal;
       const byLlm = meta.threadsClassifiedByLlm;
       const gap = meta.threadsLlmGapFilled;
-      const tail =
-        meta.remainderNeutralOnly === true
-          ? "\"Can wait\" was used for any remainder (rules disabled via env)."
-          : "Rules filled any remainder (missing or invalid ids in the model JSON).";
       notice =
         total != null && byLlm != null
           ? gap != null && gap > 0
-            ? `Model labeled ${byLlm}/${total} threads (${gap} in a follow-up pass for missed or mis-keyed ids). ${tail}`
-            : `Model labeled ${byLlm}/${total} threads; ${tail}`
+            ? `Model labeled ${byLlm}/${total} threads (${gap} in a follow-up pass for missed or mis-keyed ids).`
+            : `Model labeled ${byLlm}/${total} threads.`
           : "LLM returned partial labels; rules filled the gaps.";
     }
     if (meta?.embeddingOverrides != null && meta.embeddingOverrides > 0) {
@@ -905,6 +988,7 @@ export default function Home() {
       setClassifyNotice(notice);
     }
 
+    setClassifyProgressBanner(null);
     setStatus(`Done · classified ${sourceThreads.length} threads`);
   }
 
@@ -989,7 +1073,8 @@ export default function Home() {
     setClassifiedBucketFingerprint(null);
     setInboxGeneration(0);
     inboxGenerationRef.current = 0;
-    setCustomBuckets([]);
+    setExcludedPresetKeys([]);
+    setExtraBuckets([]);
     setCustomBucketInput("");
     setLearningMessage("");
     setClientLlmSavedKey(undefined);
@@ -1003,38 +1088,87 @@ export default function Home() {
     }
   }
 
-  function handleAddBuckets(event: FormEvent) {
-    event.preventDefault();
-    const additions = parseBucketInputs(customBucketInput);
-    if (additions.length === 0) {
+  function handleExcludePreset(presetName: BucketName) {
+    if (!DEFAULT_BUCKETS.includes(presetName)) {
+      return;
+    }
+    const nextExcluded = [...new Set([...excludedPresetKeys, presetName])].sort();
+    const presetsLeft = DEFAULT_BUCKETS.filter((b) => !nextExcluded.includes(b));
+    if (extraBuckets.length === 0 && presetsLeft.length === 0) {
       return;
     }
 
-    const next = mergeUnique(customBuckets, additions);
-    if (bucketsFingerprint(next) === bucketsFingerprint(customBuckets)) {
+    setExcludedPresetKeys(nextExcluded);
+  }
+
+  function handleIncludePreset(presetName: BucketName) {
+    if (!DEFAULT_BUCKETS.includes(presetName)) {
+      return;
+    }
+    setExcludedPresetKeys((prev) => prev.filter((x) => x !== presetName));
+  }
+
+  function handleRemoveExtraBucket(label: string) {
+    const nextExtras = extraBuckets.filter((x) => x !== label);
+    const presetsVisible = DEFAULT_BUCKETS.filter((b) => !excludedPresetKeys.includes(b));
+    if (presetsVisible.length === 0 && nextExtras.length === 0) {
+      return;
+    }
+    setExtraBuckets(nextExtras);
+  }
+
+  function handleAddBuckets(event: FormEvent) {
+    event.preventDefault();
+    const additions = parseBucketInputs(customBucketInput).filter(
+      (a) => !nameCollidesWithPreset(a),
+    );
+    if (additions.length === 0) {
       setCustomBucketInput("");
       return;
     }
 
-    setCustomBuckets(next);
+    const prevEffective = flattenBucketSelection(excludedPresetKeys, extraBuckets);
+    const nextExtras = mergeUnique(extraBuckets, additions);
+    const nextEffective = flattenBucketSelection(excludedPresetKeys, nextExtras);
+    if (bucketsFingerprint(nextEffective) === bucketsFingerprint(prevEffective)) {
+      setCustomBucketInput("");
+      return;
+    }
+
+    setExtraBuckets(nextExtras);
     setCustomBucketInput("");
-    if (threads?.length && classifiedGeneration !== null) {
-      void runClassification({ customBucketsOverride: next });
+  }
+
+  function handleBucketChipDismiss(label: string) {
+    if (DEFAULT_BUCKETS.includes(label as BucketName)) {
+      handleExcludePreset(label as BucketName);
+    } else {
+      handleRemoveExtraBucket(label);
     }
   }
 
-  function handleRemoveBucket(bucket: string) {
-    const next = customBuckets.filter((value) => value !== bucket);
-    setCustomBuckets(next);
-    if (threads?.length && classifiedGeneration !== null) {
-      void runClassification({ customBucketsOverride: next });
-    }
+  function handleRestoreBucketDefaults() {
+    setExcludedPresetKeys([]);
+    setExtraBuckets([]);
+    setCustomBucketInput("");
   }
+
+  const bucketsAtFactoryDefaults =
+    excludedPresetKeys.length === 0 && extraBuckets.length === 0;
 
   const runClassificationHighlighted =
     Boolean(threads?.length) && classificationStale && !isBusy;
 
   const inboxLoaded = threads !== null;
+
+  const showSignInSuccessToast =
+    Boolean(oauthMessage) && oauthMessage.startsWith(SIGN_IN_SUCCESS_PREFIX);
+
+  const showLearningSavedDialog =
+    Boolean(learningMessage) &&
+    learningMessage.startsWith(LEARNING_SAVED_CONFIRM_PREFIX);
+
+  const showRestoredSessionHint = status.startsWith(RESTORE_STATUS_PREFIX);
 
   return (
     <main className="relative min-h-screen overflow-hidden text-zinc-900">
@@ -1042,6 +1176,66 @@ export default function Home() {
         aria-hidden
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_120%_80%_at_50%_-20%,rgba(99,102,241,0.16),transparent),radial-gradient(ellipse_80%_50%_at_100%_40%,rgba(14,165,233,0.1),transparent),radial-gradient(ellipse_55%_45%_at_0%_100%,rgba(244,114,182,0.07),transparent)]"
       />
+      {showSignInSuccessToast ? (
+        <div
+          className="fixed inset-x-0 top-0 z-50 flex justify-center px-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-4"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex max-w-md items-center gap-2.5 rounded-b-2xl border border-emerald-200/90 bg-emerald-50/95 px-4 py-3 shadow-lg shadow-emerald-900/10 ring-1 ring-white/70 backdrop-blur-md sm:gap-3 sm:px-5">
+            <span
+              aria-hidden
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.25}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </span>
+            <p className="text-sm font-medium leading-snug text-emerald-950">{oauthMessage}</p>
+          </div>
+        </div>
+      ) : null}
+      {showLearningSavedDialog ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-[3px]"
+          role="presentation"
+          onClick={() => setLearningMessage("")}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="learning-saved-dialog-title"
+            className="max-w-md rounded-2xl border border-emerald-200/90 bg-emerald-50 px-6 py-6 shadow-2xl shadow-emerald-950/20 ring-1 ring-white/90"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700">
+              <svg
+                className="h-6 w-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <p
+              id="learning-saved-dialog-title"
+              className="text-center text-sm font-medium leading-relaxed text-emerald-950"
+            >
+              {learningMessage}
+            </p>
+            <button
+              type="button"
+              className="mt-5 w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-900/20 transition hover:bg-emerald-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600"
+              onClick={() => setLearningMessage("")}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      ) : null}
       <span className="fixed right-4 top-4 z-40 sm:right-6 sm:top-6">
         <button
           type="button"
@@ -1072,9 +1266,6 @@ export default function Home() {
                 <h1 className="text-balance bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-600 bg-clip-text text-3xl font-semibold tracking-tight text-transparent sm:text-4xl">
                   Inbox Concierge
                 </h1>
-                <p className="text-pretty text-sm leading-relaxed text-zinc-600">
-                  Load your inbox, add custom buckets if you like, then classify when you are ready.
-                </p>
               </div>
 
               <div
@@ -1082,14 +1273,67 @@ export default function Home() {
                 className="rounded-2xl border border-zinc-200/70 bg-zinc-50/40 p-4 shadow-inner shadow-zinc-100/50 sm:p-5"
               >
                 <div className="space-y-1">
-                  <h2 className="text-base font-semibold text-zinc-950">Custom Buckets</h2>
+                  <h2 className="text-base font-semibold text-zinc-950">Buckets</h2>
                   <p className="text-xs leading-relaxed text-zinc-500">
-                    Comma-separated names. While you are signed in, your list saves automatically.
+                    All four presets stay listed here—active presets have × (off); dimmed presets are off
+                    and use + to turn them back on. Custom buckets are separate below.
                   </p>
                 </div>
+                <div className="mt-4">
+                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                    Presets
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {DEFAULT_BUCKETS.map((bucket) => {
+                      const excluded = excludedPresetKeys.includes(bucket);
+                      if (!excluded) {
+                        return (
+                          <span
+                            key={bucket}
+                            className="group inline-flex items-center gap-1 rounded-full border border-emerald-200/85 bg-gradient-to-br from-emerald-50 to-white px-3.5 py-1.5 text-xs font-medium text-emerald-950 shadow-sm"
+                          >
+                            {bucket}
+                            <button
+                              type="button"
+                              aria-label={`Hide preset ${bucket} from classification`}
+                              onClick={() => handleExcludePreset(bucket)}
+                              className="-mr-0.5 flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition hover:bg-emerald-100 hover:text-emerald-900"
+                            >
+                              <span className="text-base leading-none">×</span>
+                            </button>
+                          </span>
+                        );
+                      }
+                      return (
+                        <span
+                          key={`${bucket}-off`}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300/90 bg-white/70 px-3.5 py-1.5 text-xs font-medium text-zinc-500"
+                        >
+                          <span>{bucket}</span>
+                          <span className="text-[10px] font-normal uppercase tracking-wide text-zinc-400">
+                            off
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Restore preset ${bucket}`}
+                            onClick={() => handleIncludePreset(bucket)}
+                            className="-mr-0.5 flex h-6 w-6 items-center justify-center rounded-full text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900"
+                          >
+                            <span className="text-base font-semibold leading-none" aria-hidden>
+                              +
+                            </span>
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+                <p className="mb-2 mt-5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                  Custom buckets
+                </p>
                 <form
                   onSubmit={handleAddBuckets}
-                  className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-stretch"
+                  className="flex flex-col gap-3 sm:flex-row sm:items-stretch"
                 >
                   <input
                     value={customBucketInput}
@@ -1102,7 +1346,7 @@ export default function Home() {
                     disabled={isBusy}
                     className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-xl bg-zinc-900 px-6 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 sm:px-8"
                   >
-                    Add buckets
+                    Add custom buckets
                   </button>
                 </form>
                 {bucketsSaveHint ? (
@@ -1144,13 +1388,9 @@ export default function Home() {
                     <span>Labels match this inbox load and bucket list.</span>
                   </p>
                 ) : null}
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {customBuckets.length === 0 ? (
-                    <p className="w-full rounded-xl border border-dashed border-zinc-200/90 bg-white/60 px-4 py-3 text-sm text-zinc-500">
-                      No custom buckets yet — built-in categories still apply when you classify.
-                    </p>
-                  ) : (
-                    customBuckets.map((bucket) => (
+                {extraBuckets.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {extraBuckets.map((bucket) => (
                       <span
                         key={bucket}
                         className="group inline-flex items-center gap-1 rounded-full border border-indigo-200/80 bg-gradient-to-br from-indigo-50 to-white px-3.5 py-1.5 text-xs font-medium text-indigo-950 shadow-sm"
@@ -1159,37 +1399,34 @@ export default function Home() {
                         <button
                           type="button"
                           aria-label={`Remove ${bucket}`}
-                          onClick={() => handleRemoveBucket(bucket)}
+                          onClick={() => handleBucketChipDismiss(bucket)}
                           className="-mr-0.5 flex h-6 w-6 items-center justify-center rounded-full text-indigo-500 transition hover:bg-indigo-100 hover:text-indigo-800"
                         >
                           <span className="text-base leading-none">×</span>
                         </button>
                       </span>
-                    ))
-                  )}
-                </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
 
             <div className="flex min-w-0 flex-col gap-3 lg:col-span-5 lg:sticky lg:top-6">
+              <span
+                className={`inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${
+                  isConnected
+                    ? "border-emerald-200/90 bg-emerald-50/90 text-emerald-900"
+                    : "border-zinc-200 bg-white text-zinc-600"
+                }`}
+                role="status"
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${isConnected ? "bg-emerald-500" : "bg-zinc-400"}`}
+                />
+                {isConnected ? "Gmail connected" : "Gmail not connected"}
+              </span>
               <div className="rounded-2xl border border-zinc-200/80 bg-white p-4 shadow-md shadow-zinc-200/20 sm:p-5">
-                {!isConnected ? (
-                  <div
-                    role="status"
-                    aria-live="polite"
-                    className="flex items-start gap-2.5 rounded-xl border border-zinc-200/90 bg-zinc-50 px-3 py-2.5 text-xs leading-snug text-zinc-700"
-                  >
-                    <span
-                      className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-zinc-400"
-                      aria-hidden
-                    />
-                    <span>
-                      <strong className="font-semibold text-zinc-900">Gmail is not connected.</strong>{" "}
-                      Sign in with Google below to access your inbox.
-                    </span>
-                  </div>
-                ) : null}
-                <div className={`flex flex-col gap-3 ${!isConnected ? "mt-3" : ""}`}>
+                <div className="flex flex-col gap-3">
                   <button
                     type="button"
                     onClick={handleConnectGoogle}
@@ -1266,11 +1503,19 @@ export default function Home() {
                   >
                     Run classification
                   </button>
+                  {showRestoredSessionHint ? (
+                    <p
+                      className="text-center text-xs leading-snug text-zinc-600"
+                      role="status"
+                    >
+                      {status}
+                    </p>
+                  ) : null}
                 </div>
               </div>
             </div>
           </div>
-          {oauthMessage ? (
+          {oauthMessage && !oauthMessage.startsWith(SIGN_IN_SUCCESS_PREFIX) ? (
             <div
               className="mt-5 rounded-xl border border-amber-200/90 bg-amber-50/90 px-4 py-3 text-sm text-amber-950"
               role="status"
@@ -1294,16 +1539,15 @@ export default function Home() {
               {classifyNotice}
             </div>
           ) : null}
-          {learningMessage ? (
+          {learningMessage &&
+          !learningMessage.startsWith(LEARNING_SAVED_CONFIRM_PREFIX) ? (
             <div
               className={`mt-3 rounded-xl border px-4 py-3 text-sm ${
-                learningMessage.startsWith("Saved as")
-                  ? "border-emerald-200/90 bg-emerald-50/90 text-emerald-950"
-                  : /DATABASE_URL|Learning is off|learning table is missing|could not reach postgres/i.test(
-                        learningMessage
-                      )
-                    ? "border-sky-200/90 bg-sky-50/90 text-sky-950"
-                    : "border-rose-200/90 bg-rose-50/90 text-rose-950"
+                /DATABASE_URL|Learning is off|learning table is missing|could not reach postgres/i.test(
+                  learningMessage
+                )
+                  ? "border-sky-200/90 bg-sky-50/90 text-sky-950"
+                  : "border-rose-200/90 bg-rose-50/90 text-rose-950"
               }`}
               role="status"
             >
@@ -1311,6 +1555,25 @@ export default function Home() {
             </div>
           ) : null}
         </header>
+
+        {classifyProgressBanner ? (
+          <div
+            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs text-zinc-600"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
+              <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+              <span className="min-w-0 truncate">
+                Classifying…{" "}
+                <span className="tabular-nums">{classifyProgressSec}s</span>
+                {" · "}
+                <span className="tabular-nums">{classifyProgressBanner.threadCount}</span>
+                {" threads — model is sorting (large inboxes may take ~2–3 min)"}
+              </span>
+            </span>
+          </div>
+        ) : null}
 
         <section className="grid gap-5 md:grid-cols-2">
           {bucketNames.length === 0 ? (
@@ -1329,7 +1592,7 @@ export default function Home() {
                     {!threads?.length ? (
                       <>
                         Link Gmail with Google sign-in. Add an OpenAI API key under settings. Use Load inbox
-                        to fetch or change the thread count. After adding or removing custom buckets, rerun
+                        to fetch or change the thread count. After adding or removing bucket labels, rerun
                         classification on the threads you have loaded.
                       </>
                     ) : (
@@ -1403,37 +1666,22 @@ export default function Home() {
           )}
         </section>
 
-        <div
-          className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 border-t border-zinc-200/50 pt-6 text-xs text-zinc-600"
-          role="status"
-          aria-live="polite"
-        >
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-medium ${
-              isConnected
-                ? "border-emerald-200/90 bg-emerald-50/90 text-emerald-900"
-                : "border-zinc-200 bg-white text-zinc-600"
-            }`}
+        {!showRestoredSessionHint ? (
+          <div
+            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 border-t border-zinc-200/50 pt-6 text-xs text-zinc-600"
+            role="status"
+            aria-live="polite"
           >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${isConnected ? "bg-emerald-500" : "bg-zinc-400"}`}
-            />
-            {isConnected ? "Gmail connected" : "Gmail not connected"}
-          </span>
-          <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
-            {isBusy ? (
-              <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
-            ) : (
-              <span className="h-3 w-3 shrink-0 rounded-full bg-zinc-200" />
-            )}
-            <span className="min-w-0 truncate">{status}</span>
-          </span>
-          {inboxLoaded && threads ? (
-            <span className="inline-flex rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium tabular-nums text-zinc-700">
-              {threads.length.toLocaleString()} threads loaded
+            <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
+              {isBusy ? (
+                <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+              ) : (
+                <span className="h-3 w-3 shrink-0 rounded-full bg-zinc-200" />
+              )}
+              <span className="min-w-0 truncate">{status}</span>
             </span>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
       </div>
 
       {settingsOpen ? (
@@ -1471,11 +1719,6 @@ export default function Home() {
                 <label htmlFor="settings-api-key" className="text-xs font-medium text-zinc-700">
                   OpenAI API key
                 </label>
-                <p className="text-xs leading-relaxed text-zinc-500">
-                  Keys are stored in this browser session only and sent to your server for
-                  classification. <strong className="font-medium text-zinc-700">Sign out</strong> clears
-                  them along with Gmail tokens.
-                </p>
                 <input
                   ref={settingsApiKeyInputRef}
                   id="settings-api-key"
@@ -1543,6 +1786,22 @@ export default function Home() {
                   />
                 ) : null}
               </div>
+
+              {!bucketsAtFactoryDefaults ? (
+                <div className="rounded-xl border border-zinc-200/85 bg-zinc-50/60 p-4">
+                  <p className="text-xs font-medium text-zinc-800">Buckets</p>
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={handleRestoreBucketDefaults}
+                    className="mt-2 text-xs font-semibold text-zinc-600 underline-offset-4 transition hover:text-zinc-900 hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline"
+                    title="Turns every preset back on, clears custom buckets, and saves to your account when signed in."
+                  >
+                    Restore bucket defaults
+                  </button>
+                </div>
+              ) : null}
+
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <button
                   type="button"

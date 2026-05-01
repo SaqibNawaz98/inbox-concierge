@@ -5,7 +5,7 @@ import {
   semanticJobsMatch,
   transactionalMoneyBucketMatches,
 } from "@/lib/bucketSemantics";
-import { DEFAULT_BUCKETS } from "@/lib/buckets";
+import { normalizeActiveBucketsForClassification, pickNeutralFallback } from "@/lib/activeBuckets";
 import type { BucketName, BucketedThreads, EmailThread } from "@/lib/types";
 
 /** Scan subject + preview + sender — most mislabels come from ignoring snippet text. */
@@ -119,12 +119,14 @@ function classifyCustomBucket(
   return null;
 }
 
-/** Defaults when LLM misses or fallback classifier runs — prefers Newsletter over Can wait. */
-function classifyFallbackThread(thread: EmailThread): BucketName {
+/** Defaults when LLM misses — only assigns labels that remain in `allowed`. */
+function classifyFallbackThread(thread: EmailThread, allowed: BucketName[]): BucketName {
+  const allowList = normalizeActiveBucketsForClassification(allowed);
   const blob = normalizeBlob(thread);
+  const canUse = (name: BucketName) => allowList.includes(name);
 
   for (const hint of NEWSLETTER_BLOB_HINTS) {
-    if (blob.includes(hint)) {
+    if (blob.includes(hint) && canUse("Newsletter")) {
       return "Newsletter";
     }
   }
@@ -133,58 +135,58 @@ function classifyFallbackThread(thread: EmailThread): BucketName {
     /\b(sale|deal|coupon|discount|shop now|browse|collection)\b/i.test(blob);
   if (
     looksLikePromotion &&
-    /\b(no-reply|noreply|mailer\.|marketing|news@)/i.test(thread.sender.toLowerCase())
+    /\b(no-reply|noreply|mailer\.|marketing|news@)/i.test(thread.sender.toLowerCase()) &&
+    canUse("Newsletter")
   ) {
     return "Newsletter";
   }
 
   for (const hint of AUTO_ARCHIVE_BLOB_HINTS) {
-    if (blob.includes(hint)) {
+    if (blob.includes(hint) && canUse("Auto-archive")) {
       return "Auto-archive";
     }
   }
 
   for (const hint of IMPORTANT_BLOB_HINTS) {
-    if (blob.includes(hint)) {
+    if (blob.includes(hint) && canUse("Important")) {
       return "Important";
     }
   }
 
-  return "Can wait";
+  return pickNeutralFallback(allowList) as BucketName;
 }
 
 export function inferBucketForThread(
   thread: EmailThread,
-  customBuckets: BucketName[] = []
+  activeBuckets: BucketName[] = []
 ): BucketName {
-  const customBucket = classifyCustomBucket(thread, customBuckets);
+  const normalized = normalizeActiveBucketsForClassification(activeBuckets);
+  const customBucket = classifyCustomBucket(thread, normalized);
   if (customBucket) {
     return customBucket;
   }
-  return classifyFallbackThread(thread);
+  return classifyFallbackThread(thread, normalized);
 }
 
 export function classifyThreads(
   threads: EmailThread[],
-  customBuckets: BucketName[] = []
+  activeBuckets: BucketName[] = []
 ): BucketedThreads {
+  const allBuckets = normalizeActiveBucketsForClassification(activeBuckets);
   const output: BucketedThreads = {};
-  const allBuckets = [...DEFAULT_BUCKETS, ...customBuckets];
-
   for (const bucket of allBuckets) {
     output[bucket] = [];
   }
 
   for (const thread of threads) {
-    const customBucket = classifyCustomBucket(thread, customBuckets);
+    const customBucket = classifyCustomBucket(thread, allBuckets);
     if (customBucket && output[customBucket]) {
       output[customBucket].push(thread);
       continue;
     }
 
-    const primary = classifyFallbackThread(thread);
-    const target = output[primary] ? primary : "Can wait";
-    output[target].push(thread);
+    const primary = classifyFallbackThread(thread, allBuckets);
+    output[primary].push(thread);
   }
 
   return output;

@@ -4,7 +4,11 @@ import {
   bucketUsesBillsSemantics,
   bucketUsesPostReceiptSemantics,
 } from "@/lib/bucketSemantics";
-import { DEFAULT_BUCKETS } from "@/lib/buckets";
+import {
+  normalizeActiveBucketsForClassification,
+  pickNeutralFallback,
+  resolveBucketToAllowed,
+} from "@/lib/activeBuckets";
 import { classifyThreads, inferBucketForThread } from "@/lib/classify";
 import { applyEmbeddingOverrides } from "@/lib/learningApply";
 import { friendlyLearningInfrastructureError } from "@/lib/learningDb";
@@ -26,6 +30,19 @@ import type { BucketName, BucketedThreads, EmailThread } from "@/lib/types";
  */
 const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_BATCH_SIZE = 80;
+
+/** Notes that sound like hard failures but are recovered by heuristic / gap-fill retries. */
+function suppressFromOpenAiIssues(note: string): boolean {
+  if (note.startsWith("single_shot_low_coverage:")) {
+    return true;
+  }
+  return (
+    note.startsWith("gap_fill:openai_no_valid_assignments") ||
+    note.startsWith("gap_fill:openai_json_missing_assignments") ||
+    note.startsWith("gap_fill:llm_no_valid_assignments") ||
+    note.startsWith("gap_fill:llm_json_missing_assignments")
+  );
+}
 
 type LlmStrategy = "single_request" | "batched_parallel";
 
@@ -66,11 +83,13 @@ export type ClassifyThreadsWithLlmOptions = LlmClientOverrides;
 /** When `OPENAI_CLASSIFY_RULE_GAP_FILL=false`, stragglers become `Can wait` instead of keyword rules. */
 function inferOrNeutral(
   thread: EmailThread,
-  customBuckets: BucketName[],
+  allowedBuckets: BucketName[],
 ): BucketName {
-  return process.env.OPENAI_CLASSIFY_RULE_GAP_FILL === "false"
-    ? "Can wait"
-    : inferBucketForThread(thread, customBuckets);
+  const norm = normalizeActiveBucketsForClassification(allowedBuckets);
+  if (process.env.OPENAI_CLASSIFY_RULE_GAP_FILL === "false") {
+    return pickNeutralFallback(norm) as BucketName;
+  }
+  return inferBucketForThread(thread, norm);
 }
 
 function bucketedToAssignments(bucketed: BucketedThreads): Map<string, string> {
@@ -142,7 +161,7 @@ async function finalizeAssignmentsToBuckets(params: {
     if (!bucket || !output[bucket]) {
       bucket = inferOrNeutral(thread, customBuckets);
     }
-    const target = output[bucket] ? bucket : "Can wait";
+    const target = resolveBucketToAllowed(bucket, allowedBuckets);
     output[target].push(thread);
   }
 
@@ -608,7 +627,6 @@ async function runGapFillRounds(params: {
 async function applyGapFillAndHeuristicRemainder(params: {
   threads: EmailThread[];
   assignments: Map<string, string>;
-  customBuckets: BucketName[];
   transport: ResolvedLlmTransport;
   allowedBuckets: string[];
   bucketSemantics: Record<string, string>;
@@ -628,7 +646,7 @@ async function applyGapFillAndHeuristicRemainder(params: {
     if (!params.assignments.has(thread.id)) {
       params.assignments.set(
         thread.id,
-        inferOrNeutral(thread, params.customBuckets),
+        inferOrNeutral(thread, params.allowedBuckets as BucketName[]),
       );
       heuristicFilled += 1;
     }
@@ -651,7 +669,8 @@ export async function classifyThreadsWithLlm(
   learning?: LearningContext,
   options?: ClassifyThreadsWithLlmOptions,
 ): Promise<LlmClassificationOutcome> {
-  const allowedBuckets = [...DEFAULT_BUCKETS, ...customBuckets];
+  /** Full active bucket list (request body carries every label used for classify, not additive defaults). */
+  const allowedBuckets = normalizeActiveBucketsForClassification(customBuckets);
   const transport = resolveLlmTransport(options ?? null);
   const usedClientOpenAiKey = usedClientSuppliedKey(options ?? null);
 
@@ -660,12 +679,12 @@ export async function classifyThreadsWithLlm(
     embeddingKey?: string,
   ): Promise<LlmClassificationOutcome> => {
     const assignments = bucketedToAssignments(
-      classifyThreads(threads, customBuckets)
+      classifyThreads(threads, allowedBuckets)
     );
     const { output, embeddingOverrides, learningError } =
       await finalizeAssignmentsToBuckets({
         threads,
-        customBuckets,
+        customBuckets: allowedBuckets,
         allowedBuckets,
         assignments,
         learning,
@@ -837,7 +856,6 @@ export async function classifyThreadsWithLlm(
     const batchedRemainder = await applyGapFillAndHeuristicRemainder({
       threads,
       assignments,
-      customBuckets,
       transport,
       allowedBuckets,
       bucketSemantics,
@@ -849,7 +867,6 @@ export async function classifyThreadsWithLlm(
     const singleRemainder = await applyGapFillAndHeuristicRemainder({
       threads,
       assignments,
-      customBuckets,
       transport,
       allowedBuckets,
       bucketSemantics,
@@ -862,7 +879,7 @@ export async function classifyThreadsWithLlm(
   const { output, embeddingOverrides, learningError } =
     await finalizeAssignmentsToBuckets({
       threads,
-      customBuckets,
+      customBuckets: allowedBuckets,
       allowedBuckets,
       assignments,
       learning,
@@ -871,12 +888,10 @@ export async function classifyThreadsWithLlm(
       llmClientOverrides: options ?? null,
     });
 
-  /** Single-shot shortfall is expected; batched path already recovered—do not surface as a failure. */
+  /** Omit notes that downstream recovery already handled so the UI stays accurate. */
   const openaiIssuesRaw =
     batchErrors.length > 0
-      ? [...new Set(batchErrors)].filter(
-          (item) => !item.startsWith("single_shot_low_coverage:")
-        )
+      ? [...new Set(batchErrors)].filter((item) => !suppressFromOpenAiIssues(item))
       : [];
   const openaiIssues =
     openaiIssuesRaw.length > 0

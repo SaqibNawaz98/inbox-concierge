@@ -7,36 +7,9 @@ export type SavedBucketsPayload = {
   /** First 32 hex chars of sha256(refresh_token), matches accountKey elsewhere */
   k: string;
   b: string[];
+  /** 2 = `b` is the full active bucket list; omitted = additive-only legacy (merged with defaults on parse). */
+  fv?: 2;
 };
-
-export function parseSavedBucketsCookie(
-  raw: string | undefined,
-  expectedAccountKey: string,
-): string[] | null {
-  if (!raw?.trim()) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as SavedBucketsPayload;
-    if (parsed.k !== expectedAccountKey || !Array.isArray(parsed.b)) {
-      return null;
-    }
-    return validateBucketList(parsed.b);
-  } catch {
-    return null;
-  }
-}
-
-export function serializeSavedBucketsCookie(
-  accountKey: string,
-  buckets: string[],
-): string {
-  const payload: SavedBucketsPayload = {
-    k: accountKey,
-    b: validateBucketList(buckets) ?? [],
-  };
-  return JSON.stringify(payload);
-}
 
 /** Returns normalized list or null if invalid. */
 export function validateBucketList(input: unknown): string[] | null {

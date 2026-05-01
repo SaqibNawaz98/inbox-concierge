@@ -1,6 +1,8 @@
 # Optional Postgres: learning ("Remember") + saved custom buckets.
-# From repo root: docker compose up -d
-# Host port 15432 (see DATABASE_URL in .env.example).
+#
+# Postgres only (default):     docker compose up -d postgres
+# App + Postgres (full stack): docker compose --profile app up --build
+# DATABASE_URL uses hostname `postgres` on the Compose network.
 
 services:
   postgres:
@@ -18,6 +20,23 @@ services:
       interval: 3s
       timeout: 5s
       retries: 10
+
+  web:
+    profiles:
+      - app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://inbox:inbox@postgres:5432/inbox_concierge
+    env_file:
+      - path: .env.docker
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   inbox_concierge_pg:

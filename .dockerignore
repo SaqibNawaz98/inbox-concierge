@@ -1,0 +1,29 @@
+# Keep build context small — improves cache hit rate and deterministic COPY layers.
+
+.git
+.github
+.next
+node_modules
+
+# Logs & tooling
+coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+*.pem
+.vercel
+
+# Agent / editor
+.cursor
+.idea
+.vscode
+
+# Docs (optional; safe to omit from image layers)
+README.md
