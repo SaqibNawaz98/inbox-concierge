@@ -9,7 +9,10 @@ import {
   useState,
 } from "react";
 import { DEFAULT_BUCKETS } from "@/lib/buckets";
-import { INBOX_THREAD_PRESETS } from "@/lib/gmailInboxLimits";
+import {
+  DEFAULT_GMAIL_MAX_THREADS,
+  INBOX_THREAD_PRESETS,
+} from "@/lib/gmailInboxLimits";
 import {
   flattenBucketSelection,
   normalizeActiveBucketsForClassification,
@@ -367,7 +370,7 @@ export default function Home() {
   const [learningDbAvailable, setLearningDbAvailable] = useState<boolean | null>(null);
   const [savingExampleId, setSavingExampleId] = useState<string | null>(null);
   const [inboxLoadLimit, setInboxLoadLimit] = useState(200);
-  const [inboxMaxCap, setInboxMaxCap] = useState(5000);
+  const [inboxMaxCap, setInboxMaxCap] = useState(DEFAULT_GMAIL_MAX_THREADS);
   const [bucketsPersistEnabled, setBucketsPersistEnabled] = useState(false);
   const [bucketsSaveHint, setBucketsSaveHint] = useState("");
   /**
@@ -1273,7 +1276,20 @@ export default function Home() {
                 className="rounded-2xl border border-zinc-200/70 bg-zinc-50/40 p-4 shadow-inner shadow-zinc-100/50 sm:p-5"
               >
                 <div className="space-y-1">
-                  <h2 className="text-base font-semibold text-zinc-950">Buckets</h2>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <h2 className="text-base font-semibold text-zinc-950">Buckets</h2>
+                    {!bucketsAtFactoryDefaults ? (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={handleRestoreBucketDefaults}
+                        className="shrink-0 text-xs font-semibold text-zinc-600 underline-offset-4 transition hover:text-zinc-900 hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline"
+                        title="Turns every preset back on, clears custom buckets, and saves to your account when signed in."
+                      >
+                        Restore bucket defaults
+                      </button>
+                    ) : null}
+                  </div>
                   <p className="text-xs leading-relaxed text-zinc-500">
                     All four presets stay listed here—active presets have × (off); dimmed presets are off
                     and use + to turn them back on. Custom buckets are separate below.
@@ -1786,21 +1802,6 @@ export default function Home() {
                   />
                 ) : null}
               </div>
-
-              {!bucketsAtFactoryDefaults ? (
-                <div className="rounded-xl border border-zinc-200/85 bg-zinc-50/60 p-4">
-                  <p className="text-xs font-medium text-zinc-800">Buckets</p>
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={handleRestoreBucketDefaults}
-                    className="mt-2 text-xs font-semibold text-zinc-600 underline-offset-4 transition hover:text-zinc-900 hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline"
-                    title="Turns every preset back on, clears custom buckets, and saves to your account when signed in."
-                  >
-                    Restore bucket defaults
-                  </button>
-                </div>
-              ) : null}
 
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <button
