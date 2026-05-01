@@ -9,6 +9,21 @@ export type StoredGoogleTokens = {
   expiry_date?: number | null;
 };
 
+/**
+ * Persist only the OAuth refresh token. Google access tokens are large JWTs and
+ * routinely exceed browser cookie limits (~4KB); the gmail route refreshes short-lived access.
+ */
+export async function persistMinimalGoogleOAuthCookie(refreshToken: string) {
+  const cookieStore = await cookies();
+  cookieStore.set(GOOGLE_TOKENS_COOKIE, JSON.stringify({ refresh_token: refreshToken }), {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 365,
+  });
+}
+
 export async function setGoogleStateCookie(state: string) {
   const cookieStore = await cookies();
   cookieStore.set(GOOGLE_STATE_COOKIE, state, {
@@ -31,14 +46,11 @@ export async function clearGoogleStateCookie() {
 }
 
 export async function setGoogleTokensCookie(tokens: StoredGoogleTokens) {
-  const cookieStore = await cookies();
-  cookieStore.set(GOOGLE_TOKENS_COOKIE, JSON.stringify(tokens), {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-  });
+  const refresh = tokens.refresh_token;
+  if (!refresh) {
+    return;
+  }
+  await persistMinimalGoogleOAuthCookie(refresh);
 }
 
 export async function readGoogleTokensCookie(): Promise<StoredGoogleTokens | null> {
@@ -53,4 +65,9 @@ export async function readGoogleTokensCookie(): Promise<StoredGoogleTokens | nul
   } catch {
     return null;
   }
+}
+
+export async function clearGoogleTokensCookie() {
+  const cookieStore = await cookies();
+  cookieStore.delete(GOOGLE_TOKENS_COOKIE);
 }

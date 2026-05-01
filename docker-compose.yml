@@ -1,0 +1,23 @@
+# Optional Postgres: learning ("Remember") + saved custom buckets.
+# From repo root: docker compose up -d
+# Host port 15432 (see DATABASE_URL in .env.example).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_USER: inbox
+      POSTGRES_PASSWORD: inbox
+      POSTGRES_DB: inbox_concierge
+    volumes:
+      - inbox_concierge_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inbox -d inbox_concierge"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  inbox_concierge_pg:

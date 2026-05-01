@@ -1,10 +1,22 @@
+import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { readGoogleTokensCookie, setGoogleTokensCookie } from "@/lib/authCookies";
+import {
+  persistMinimalGoogleOAuthCookie,
+  readGoogleTokensCookie,
+} from "@/lib/authCookies";
+import {
+  GMAIL_THREADS_LIST_PAGE_CAP,
+  maxInboxThreadsFromEnv,
+  parseInboxThreadLimit,
+} from "@/lib/gmailInboxLimits";
 import { getGoogleOAuthClient } from "@/lib/google";
 import type { EmailThread } from "@/lib/types";
 
-export async function GET() {
+/** Large inbox pulls can take several minutes (many Gmail thread.get calls). */
+export const maxDuration = 300;
+
+export async function GET(request: NextRequest) {
   const storedTokens = await readGoogleTokensCookie();
   if (!storedTokens || (!storedTokens.access_token && !storedTokens.refresh_token)) {
     return NextResponse.json(
@@ -13,33 +25,71 @@ export async function GET() {
     );
   }
 
+  const limit = parseInboxThreadLimit(request.nextUrl.searchParams.get("limit"));
+  const maxAllowed = maxInboxThreadsFromEnv();
+  const rawListPage = Number(process.env.GMAIL_THREADS_LIST_PAGE_SIZE);
+  const listPageSize = Math.min(
+    GMAIL_THREADS_LIST_PAGE_CAP,
+    Number.isFinite(rawListPage) && rawListPage >= 1
+      ? Math.floor(rawListPage)
+      : GMAIL_THREADS_LIST_PAGE_CAP,
+  );
+  const rawConcurrency = Number(process.env.GMAIL_THREAD_FETCH_CONCURRENCY);
+  const fetchConcurrency = Math.min(
+    40,
+    Math.max(
+      4,
+      Number.isFinite(rawConcurrency) && rawConcurrency >= 1
+        ? Math.floor(rawConcurrency)
+        : 20,
+    ),
+  );
+
+  if (storedTokens.refresh_token) {
+    await persistMinimalGoogleOAuthCookie(storedTokens.refresh_token);
+  }
+
   try {
     const oauthClient = getGoogleOAuthClient();
-    oauthClient.setCredentials({
-      access_token: storedTokens.access_token ?? undefined,
-      refresh_token: storedTokens.refresh_token ?? undefined,
-      expiry_date: storedTokens.expiry_date ?? undefined,
-    });
+    if (storedTokens.refresh_token) {
+      oauthClient.setCredentials({
+        refresh_token: storedTokens.refresh_token,
+      });
+    } else {
+      oauthClient.setCredentials({
+        access_token: storedTokens.access_token ?? undefined,
+      });
+    }
 
-    // This refreshes access token when needed and updates oauth credentials.
     await oauthClient.getAccessToken();
-    const refreshed = oauthClient.credentials;
-    await setGoogleTokensCookie({
-      access_token: refreshed.access_token ?? storedTokens.access_token ?? null,
-      refresh_token: refreshed.refresh_token ?? storedTokens.refresh_token ?? null,
-      expiry_date: refreshed.expiry_date ?? storedTokens.expiry_date ?? null,
-    });
 
     const gmail = google.gmail({ version: "v1", auth: oauthClient });
-    const listResponse = await gmail.users.threads.list({
-      userId: "me",
-      maxResults: 200,
-    });
-    const threadRefs = listResponse.data.threads ?? [];
 
+    const threadRefs: { id?: string | null }[] = [];
+    let pageToken: string | undefined;
+
+    while (threadRefs.length < limit) {
+      const remaining = limit - threadRefs.length;
+      const maxResults = Math.min(listPageSize, remaining);
+      const listResponse = await gmail.users.threads.list({
+        userId: "me",
+        labelIds: ["INBOX"],
+        maxResults,
+        pageToken,
+      });
+      const page = listResponse.data.threads ?? [];
+      threadRefs.push(...page);
+      pageToken = listResponse.data.nextPageToken ?? undefined;
+      if (!pageToken || page.length === 0) {
+        break;
+      }
+    }
+
+    const trimmed = threadRefs.slice(0, limit);
     const threads: EmailThread[] = [];
-    for (let index = 0; index < threadRefs.length; index += 20) {
-      const chunk = threadRefs.slice(index, index + 20);
+
+    for (let index = 0; index < trimmed.length; index += fetchConcurrency) {
+      const chunk = trimmed.slice(index, index + fetchConcurrency);
       const fetched = await Promise.all(
         chunk.map(async (threadRef) => {
           if (!threadRef.id) {
@@ -52,8 +102,16 @@ export async function GET() {
             metadataHeaders: ["Subject", "From", "Date"],
           });
 
-          const firstMessage = detail.data.messages?.[0];
-          const headers = firstMessage?.payload?.headers ?? [];
+          const messages = detail.data.messages ?? [];
+          const latestMessage = messages.reduce<(typeof messages)[number] | undefined>(
+            (best, msg) => {
+              const t = Number(msg.internalDate ?? 0);
+              const bt = Number(best?.internalDate ?? 0);
+              return t >= bt ? msg : best;
+            },
+            undefined,
+          );
+          const headers = latestMessage?.payload?.headers ?? [];
           const subject = headers.find((h) => h.name === "Subject")?.value ?? "(No subject)";
           const sender = headers.find((h) => h.name === "From")?.value ?? "Unknown sender";
           const receivedAt = headers.find((h) => h.name === "Date")?.value ?? "";
@@ -74,6 +132,8 @@ export async function GET() {
     return NextResponse.json({
       source: "gmail",
       count: threads.length,
+      requestedLimit: limit,
+      maxAllowed,
       threads,
     });
   } catch (error) {

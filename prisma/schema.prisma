@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// User-labeled thread → embedding for kNN retrieval (per Google account via accountKey).
+model MailTrainingExample {
+  id              String   @id @default(cuid())
+  accountKey      String
+  gmailThreadId   String
+  bucket          String
+  subject         String   @default("")
+  preview         String   @default("")
+  sender          String   @default("")
+  /// OpenAI embedding vector (JSON number[]).
+  embedding       Json
+  embeddingModel  String   @default("text-embedding-3-small")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([accountKey, gmailThreadId])
+  @@index([accountKey])
+}
+
+/// Custom bucket names for classify UI (per Google account via accountKey).
+model SavedCustomBuckets {
+  id         String   @id @default(cuid())
+  accountKey String   @unique
+  /// string[] JSON
+  buckets    Json
+  updatedAt  DateTime @updatedAt
+}

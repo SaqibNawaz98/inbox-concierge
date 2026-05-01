@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   clearGoogleStateCookie,
   readGoogleStateCookie,
+  readGoogleTokensCookie,
   setGoogleTokensCookie,
 } from "@/lib/authCookies";
 import { getGoogleOAuthClient } from "@/lib/google";
@@ -39,12 +40,14 @@ export async function GET(request: NextRequest) {
     const oauthClient = getGoogleOAuthClient();
     const tokenResponse = await oauthClient.getToken(code);
     const tokens = tokenResponse.tokens;
+    const prior = await readGoogleTokensCookie();
+    const refreshToken = tokens.refresh_token ?? prior?.refresh_token ?? null;
 
-    await setGoogleTokensCookie({
-      access_token: tokens.access_token ?? null,
-      refresh_token: tokens.refresh_token ?? null,
-      expiry_date: tokens.expiry_date ?? null,
-    });
+    if (!refreshToken) {
+      return NextResponse.redirect(buildHomeRedirect("error", "missing_refresh_token"));
+    }
+
+    await setGoogleTokensCookie({ refresh_token: refreshToken });
 
     return NextResponse.redirect(buildHomeRedirect("success"));
   } catch {
