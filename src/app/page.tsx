@@ -1150,15 +1150,6 @@ export default function Home() {
     }
   }
 
-  function handleRestoreBucketDefaults() {
-    setExcludedPresetKeys([]);
-    setExtraBuckets([]);
-    setCustomBucketInput("");
-  }
-
-  const bucketsAtFactoryDefaults =
-    excludedPresetKeys.length === 0 && extraBuckets.length === 0;
-
   const runClassificationHighlighted =
     Boolean(threads?.length) && classificationStale && !isBusy;
 
@@ -1170,8 +1161,6 @@ export default function Home() {
   const showLearningSavedDialog =
     Boolean(learningMessage) &&
     learningMessage.startsWith(LEARNING_SAVED_CONFIRM_PREFIX);
-
-  const showRestoredSessionHint = status.startsWith(RESTORE_STATUS_PREFIX);
 
   return (
     <main className="relative min-h-screen overflow-hidden text-zinc-900">
@@ -1276,20 +1265,7 @@ export default function Home() {
                 className="rounded-2xl border border-zinc-200/70 bg-zinc-50/40 p-4 shadow-inner shadow-zinc-100/50 sm:p-5"
               >
                 <div className="space-y-1">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <h2 className="text-base font-semibold text-zinc-950">Buckets</h2>
-                    {!bucketsAtFactoryDefaults ? (
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={handleRestoreBucketDefaults}
-                        className="shrink-0 text-xs font-semibold text-zinc-600 underline-offset-4 transition hover:text-zinc-900 hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline"
-                        title="Turns every preset back on, clears custom buckets, and saves to your account when signed in."
-                      >
-                        Restore bucket defaults
-                      </button>
-                    ) : null}
-                  </div>
+                  <h2 className="text-base font-semibold text-zinc-950">Buckets</h2>
                   <p className="text-xs leading-relaxed text-zinc-500">
                     All four presets stay listed here—active presets have × (off); dimmed presets are off
                     and use + to turn them back on. Custom buckets are separate below.
@@ -1519,14 +1495,6 @@ export default function Home() {
                   >
                     Run classification
                   </button>
-                  {showRestoredSessionHint ? (
-                    <p
-                      className="text-center text-xs leading-snug text-zinc-600"
-                      role="status"
-                    >
-                      {status}
-                    </p>
-                  ) : null}
                 </div>
               </div>
             </div>
@@ -1572,24 +1540,35 @@ export default function Home() {
           ) : null}
         </header>
 
-        {classifyProgressBanner ? (
-          <div
-            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs text-zinc-600"
-            role="status"
-            aria-live="polite"
-          >
-            <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
-              <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
-              <span className="min-w-0 truncate">
-                Classifying…{" "}
-                <span className="tabular-nums">{classifyProgressSec}s</span>
-                {" · "}
-                <span className="tabular-nums">{classifyProgressBanner.threadCount}</span>
-                {" threads — model is sorting (large inboxes may take ~2–3 min)"}
-              </span>
-            </span>
-          </div>
-        ) : null}
+        <div
+          className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs text-zinc-600"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
+            {classifyProgressBanner ? (
+              <>
+                <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+                <span className="min-w-0 truncate">
+                  Classifying…{" "}
+                  <span className="tabular-nums">{classifyProgressSec}s</span>
+                  {" · "}
+                  <span className="tabular-nums">{classifyProgressBanner.threadCount}</span>
+                  {" threads — model is sorting (large inboxes may take ~2–3 min)"}
+                </span>
+              </>
+            ) : (
+              <>
+                {isBusy ? (
+                  <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+                ) : (
+                  <span className="h-3 w-3 shrink-0 rounded-full bg-zinc-200" />
+                )}
+                <span className="min-w-0 truncate">{status}</span>
+              </>
+            )}
+          </span>
+        </div>
 
         <section className="grid gap-5 md:grid-cols-2">
           {bucketNames.length === 0 ? (
@@ -1681,23 +1660,6 @@ export default function Home() {
             })
           )}
         </section>
-
-        {!showRestoredSessionHint ? (
-          <div
-            className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 border-t border-zinc-200/50 pt-6 text-xs text-zinc-600"
-            role="status"
-            aria-live="polite"
-          >
-            <span className="inline-flex max-w-full items-center gap-2 rounded-full border border-zinc-200/90 bg-white px-2.5 py-1 font-medium text-zinc-700">
-              {isBusy ? (
-                <span className="h-3 w-3 shrink-0 motion-safe:animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
-              ) : (
-                <span className="h-3 w-3 shrink-0 rounded-full bg-zinc-200" />
-              )}
-              <span className="min-w-0 truncate">{status}</span>
-            </span>
-          </div>
-        ) : null}
       </div>
 
       {settingsOpen ? (
